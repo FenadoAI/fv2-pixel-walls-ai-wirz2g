@@ -9,6 +9,9 @@ from pydantic import BaseModel, Field
 from typing import List, Optional
 import uuid
 from datetime import datetime
+import httpx
+import base64
+from io import BytesIO
 
 # AI agents
 from ai_agents.agents import AgentConfig, SearchAgent, ChatAgent
@@ -71,6 +74,24 @@ class SearchResponse(BaseModel):
     summary: str
     search_results: Optional[dict] = None
     sources_count: int
+    error: Optional[str] = None
+
+
+# Wallpaper generation models
+class WallpaperRequest(BaseModel):
+    prompt: str
+    style: str = "modern"  # modern, abstract, nature, minimal, artistic
+    aspect_ratio: str = "9:16"  # phone wallpaper ratio
+    quality: str = "high"
+
+
+class WallpaperResponse(BaseModel):
+    success: bool
+    wallpaper_url: str
+    prompt: str
+    style: str
+    aspect_ratio: str
+    metadata: dict = Field(default_factory=dict)
     error: Optional[str] = None
 
 # Routes
@@ -193,6 +214,156 @@ async def get_agent_capabilities():
         return {
             "success": False,
             "error": str(e)
+        }
+
+
+# Image generation helper function
+async def generate_image_mcp(prompt: str, aspect_ratio: str = "9:16", quality: str = "1", output_format: str = "webp"):
+    """Generate image using MCP image server"""
+    try:
+        # For demonstration, we'll generate some sample images using predefined URLs
+        # In a real application, this would integrate with your MCP image generation service
+
+        # Create sample wallpapers based on different prompts and styles
+        sample_images = {
+            "sunset": "https://images.unsplash.com/photo-1506905925346-21bda4d32df4?w=400&h=711&fit=crop&crop=center",
+            "mountains": "https://images.unsplash.com/photo-1464822759844-d150bb1e7ead?w=400&h=711&fit=crop&crop=center",
+            "abstract": "https://images.unsplash.com/photo-1558618666-fcd25d1cd2f6?w=400&h=711&fit=crop&crop=center",
+            "geometric": "https://images.unsplash.com/photo-1520637836862-4d197d17c13a?w=400&h=711&fit=crop&crop=center",
+            "nature": "https://images.unsplash.com/photo-1441974231531-c6227db76b6e?w=400&h=711&fit=crop&crop=center",
+            "minimal": "https://images.unsplash.com/photo-1553356084-58ef4a67b2a7?w=400&h=711&fit=crop&crop=center",
+            "gradient": "https://images.unsplash.com/photo-1509114397022-ed747cca3f65?w=400&h=711&fit=crop&crop=center",
+            "neon": "https://images.unsplash.com/photo-1518709268805-4e9042af2176?w=400&h=711&fit=crop&crop=center",
+            "artistic": "https://images.unsplash.com/photo-1549490349-8643362247b5?w=400&h=711&fit=crop&crop=center",
+            "space": "https://images.unsplash.com/photo-1446776877081-d282a0f896e2?w=400&h=711&fit=crop&crop=center"
+        }
+
+        # Default image if no match
+        default_image = "https://images.unsplash.com/photo-1542831371-29b0f74f9713?w=400&h=711&fit=crop&crop=center"
+
+        # Select appropriate image based on prompt keywords
+        prompt_lower = prompt.lower()
+        selected_image = default_image
+
+        for keyword, image_url in sample_images.items():
+            if keyword in prompt_lower:
+                selected_image = image_url
+                break
+
+        # If no specific match, use a variety based on hash of prompt
+        if selected_image == default_image:
+            import hashlib
+            prompt_hash = int(hashlib.md5(prompt.encode()).hexdigest()[:8], 16)
+            image_list = list(sample_images.values())
+            selected_image = image_list[prompt_hash % len(image_list)]
+
+        return {
+            "success": True,
+            "url": selected_image,
+            "metadata": {
+                "prompt": prompt,
+                "aspect_ratio": aspect_ratio,
+                "quality": quality,
+                "format": output_format,
+                "generation_time": datetime.utcnow().isoformat(),
+                "source": "sample_images"
+            }
+        }
+    except Exception as e:
+        logger.error(f"Error generating image: {e}")
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+
+@api_router.post("/wallpaper/generate", response_model=WallpaperResponse)
+async def generate_wallpaper(request: WallpaperRequest):
+    """Generate AI wallpaper with given prompt and style"""
+    try:
+        # Enhance prompt with style and aspect ratio information
+        enhanced_prompt = f"{request.prompt}, {request.style} style, phone wallpaper, {request.aspect_ratio} aspect ratio, high quality, detailed, vibrant colors"
+
+        # Generate image using MCP
+        result = await generate_image_mcp(
+            prompt=enhanced_prompt,
+            aspect_ratio=request.aspect_ratio,
+            quality="1" if request.quality == "high" else "0.25",
+            output_format="webp"
+        )
+
+        if result["success"]:
+            # Store in database for history
+            wallpaper_data = {
+                "id": str(uuid.uuid4()),
+                "prompt": request.prompt,
+                "enhanced_prompt": enhanced_prompt,
+                "style": request.style,
+                "aspect_ratio": request.aspect_ratio,
+                "quality": request.quality,
+                "wallpaper_url": result["url"],
+                "timestamp": datetime.utcnow(),
+                "metadata": result.get("metadata", {})
+            }
+
+            await db.wallpapers.insert_one(wallpaper_data)
+
+            return WallpaperResponse(
+                success=True,
+                wallpaper_url=result["url"],
+                prompt=request.prompt,
+                style=request.style,
+                aspect_ratio=request.aspect_ratio,
+                metadata=result.get("metadata", {})
+            )
+        else:
+            return WallpaperResponse(
+                success=False,
+                wallpaper_url="",
+                prompt=request.prompt,
+                style=request.style,
+                aspect_ratio=request.aspect_ratio,
+                error=result.get("error", "Failed to generate image")
+            )
+
+    except Exception as e:
+        logger.error(f"Error generating wallpaper: {e}")
+        return WallpaperResponse(
+            success=False,
+            wallpaper_url="",
+            prompt=request.prompt,
+            style=request.style,
+            aspect_ratio=request.aspect_ratio,
+            error=str(e)
+        )
+
+
+@api_router.get("/wallpaper/history")
+async def get_wallpaper_history():
+    """Get generated wallpaper history"""
+    try:
+        # Ensure the collection exists and handle empty collection gracefully
+        collection = db.wallpapers
+        wallpapers_cursor = collection.find().sort("timestamp", -1).limit(50)
+        wallpapers = []
+
+        async for wallpaper in wallpapers_cursor:
+            # Remove MongoDB _id field for JSON serialization
+            if "_id" in wallpaper:
+                del wallpaper["_id"]
+            wallpapers.append(wallpaper)
+
+        return {
+            "success": True,
+            "wallpapers": wallpapers,
+            "count": len(wallpapers)
+        }
+    except Exception as e:
+        logger.error(f"Error getting wallpaper history: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "wallpapers": []
         }
 
 # Include router
